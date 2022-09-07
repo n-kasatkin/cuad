@@ -3,3 +3,6 @@ transformers[torch]==4.4
 tensorboardX
 mlflow
 google-cloud-storage
+sklearn
+fuzzywuzzy
+python-Levenshtein

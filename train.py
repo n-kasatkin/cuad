@@ -26,7 +26,12 @@ import timeit
 import json
 import mlflow
 
+from fuzzywuzzy import fuzz
+from collections import defaultdict
+from sklearn.metrics import classification_report, confusion_matrix
+
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader, RandomSampler, DistributedSampler, SequentialSampler
 from tqdm import tqdm, trange
@@ -60,6 +65,16 @@ logger = logging.getLogger(__name__)
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_QUESTION_ANSWERING_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+
+def find_key(d, s):
+    max_ratio = -1
+    for k in d.keys():
+        r = fuzz.ratio(k, s)
+        if r > max_ratio:
+            key = k
+            max_ratio = r
+    return key
 
 
 def set_seed(args):
@@ -430,6 +445,55 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     # Compute the F1 and exact scores.
     results = squad_evaluate(examples, predictions)
+    
+    # Compute classification metrics
+    y_true, y_pred = [], []
+    for k, v in predictions.items():
+        y_true.append(k)
+        y_pred.append(v)
+        
+    report = classification_report(y_true, y_pred, zero_division=0, output_dict=True)
+    results[f"test_accuracy_overall"] = report["accuracy"]
+    results[f"test_f1_overall"] = report["macro avg"]["f1-score"]
+    results[f"test_recall_overall"] = report["macro avg"]["recall"]
+    results[f"test_precision_overall"] = report["macro avg"]["precision"]
+    
+    class_label, class_preds = defaultdict(list), defaultdict(list)
+    cat_desc = pd.read_csv(args.category_description).set_index("details").to_dict()["short_name"]
+    for example, l, p in zip(examples, y_true, y_pred):
+        q = example.question_text
+        short_q = find_key(cat_desc, q)
+        q_cat = cat_desc[short_q]
+        class_label[q_cat].append(l)
+        class_preds[q_cat].append(p)
+        
+    for cat in class_label.keys():
+        preds = class_preds[cat]
+        labels = class_label[cat]
+        report = classification_report(labels, preds, zero_division=0, output_dict=True)
+        results[f"test_{cat}_accuracy"] = report["accuracy"]
+        for metric in ["precision", "recall", "f1-score"]:
+            results[f"test_{cat}_{metric}"] = report["macro avg"][metric]
+    
+    cm = confusion_matrix(y_true, y_pred)
+    FP = cm.sum(axis=0) - np.diag(cm)  
+    FN = cm.sum(axis=1) - np.diag(cm)
+    TP = np.diag(cm)
+    TN = cm.reshape(-1).sum() - (FP + FN + TP)
+
+    # False positive rate
+    FPR = FP/(FP+TN)
+    FPR[np.isnan(FPR)] = 0.
+    FPR = FPR.mean()
+    
+    # False negative rate
+    FNR = FN/(TP+FN)
+    FNR[np.isnan(FNR)] = 0.
+    FNR = FNR.mean()
+    
+    results[f"test_FPR"] = FPR
+    results[f"test_FNR"] = FNR
+        
     print(results)
     return results
 
@@ -577,6 +641,12 @@ def main():
         type=str,
         help="The input evaluation file. If a data dir is specified, will look for the file there"
         + "If no data dir or train/predict files are specified, will run with tensorflow_datasets.",
+    )
+    parser.add_argument(
+        "--category_description",
+        default=None,
+        type=str,
+        help="Category description.",
     )
     parser.add_argument(
         "--config_name", default="", type=str, help="Pretrained config name or path if not the same as model_name"
@@ -909,7 +979,7 @@ def main():
 
 
 if __name__ == "__main__":
-    LOG_TO_MLFLOW = True
+    LOG_TO_MLFLOW = False
     if LOG_TO_MLFLOW:
         USERNAME = "n.kasatkin"
         os.environ[
