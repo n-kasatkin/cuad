@@ -24,6 +24,7 @@ import os
 import random
 import timeit
 import json
+import mlflow
 
 import numpy as np
 import torch
@@ -125,7 +126,7 @@ def train(args, train_dataset, model, tokenizer):
         train_dataset = get_random_subset(train_dataset, keep_frac=args.keep_frac)
 
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+    train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=args.num_workers)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -275,8 +276,16 @@ def train(args, train_dataset, model, tokenizer):
                         results = evaluate(args, model, tokenizer)
                         for key, value in results.items():
                             tb_writer.add_scalar("eval_{}".format(key), value, global_step)
+                            if LOG_TO_MLFLOW:
+                                mlflow.log_metric(f"eval_{key}", value, global_step)
+                                
                     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
                     tb_writer.add_scalar("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
+                    
+                    if LOG_TO_MLFLOW:
+                        mlflow.log_metric("loss", (tr_loss - logging_loss) / args.logging_steps, global_step)
+                        mlflow.log_metric("lr", scheduler.get_lr()[0], global_step)
+                    
                     logging_loss = tr_loss
 
                 # Save model checkpoint
@@ -297,6 +306,7 @@ def train(args, train_dataset, model, tokenizer):
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
+            
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
@@ -320,7 +330,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     # Note that DistributedSampler samples randomly
     eval_sampler = SequentialSampler(dataset)
-    eval_dataloader = DataLoader(dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
+    eval_dataloader = DataLoader(dataset, sampler=eval_sampler, batch_size=args.eval_batch_size, num_workers=args.num_workers)
 
     # multi-gpu evaluate
     if args.n_gpu > 1 and not isinstance(model, torch.nn.DataParallel):
@@ -698,6 +708,11 @@ def main():
         help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit",
     )
     parser.add_argument(
+        "--num_workers", 
+        type=int,
+        help="Num workers for dataloaders",
+    )
+    parser.add_argument(
         "--fp16_opt_level",
         type=str,
         default="O1",
@@ -742,12 +757,15 @@ def main():
     # Setup CUDA, GPU & distributed training
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-        args.n_gpu = 0 if args.no_cuda else torch.cuda.device_count()
+        args.n_gpu = 1
+#         args.n_gpu = 0 if args.no_cuda else torch.cuda.device_count()
     else:  # Initializes the distributed backend which will take care of sychronizing nodes/GPUs
+        assert False, "Distributed is not supported"
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
         torch.distributed.init_process_group(backend="nccl")
         args.n_gpu = 1
+        
     args.device = device
 
     # Setup logging
@@ -764,6 +782,7 @@ def main():
         bool(args.local_rank != -1),
         args.fp16,
     )
+#     assert False
     # Set the verbosity to info of the Transformers logger (on main process only):
     if is_main_process(args.local_rank):
         transformers.utils.logging.set_verbosity_info()
@@ -776,6 +795,11 @@ def main():
     if args.local_rank not in [-1, 0]:
         # Make sure only the first process in distributed training will download model & vocab
         torch.distributed.barrier()
+        
+    if LOG_TO_MLFLOW:
+        mlflow.log_params(dict(vars(args)))
+        mlflow.log_artifact(args.train_file, artifact_path="dataset")
+        mlflow.log_artifact(args.predict_file, artifact_path="dataset")
 
     args.model_type = args.model_type.lower()
     config = AutoConfig.from_pretrained(
@@ -842,6 +866,9 @@ def main():
         # So we use use_fast=False here for now until Fast-tokenizer-compatible-examples are out
         tokenizer = AutoTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case, use_fast=False)
         model.to(args.device)
+    
+    if LOG_TO_MLFLOW:
+        mlflow.log_artifacts(args.output_dir, artifact_path="model")
 
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     results = {}
@@ -872,9 +899,37 @@ def main():
 
             result = dict((k + ("_{}".format(global_step) if global_step else ""), v) for k, v in result.items())
             results.update(result)
+            
+    if LOG_TO_MLFLOW:
+        mlflow.log_artifacts(args.output_dir, artifact_path="model")
+        for key, value in results.items():
+            mlflow.log_metric(f"test_{key}", value)
 
     return results
 
 
 if __name__ == "__main__":
-    main()
+    LOG_TO_MLFLOW = True
+    if LOG_TO_MLFLOW:
+        USERNAME = "n.kasatkin"
+        os.environ[
+            "GOOGLE_APPLICATION_CREDENTIALS"
+        ] = "/jupyter/Nikita.Kasatkin/creds/mlflow-sport-acronis-zero.json"
+        os.environ["MLFLOW_TRACKING_USERNAME"] = USERNAME
+        os.environ["MLFLOW_TRACKING_PASSWORD"] = "P2qsFTrnfFyZ6Q"
+
+        mlflow_params = {
+            "run_name": "cuad-training", 
+            "tracking_uri": "https://mlflow.sit.auto",
+            "experiment_name": "lawinsider-qa",
+            "tags": {"mlflow.user": USERNAME},
+        }
+        
+        mlflow.set_tracking_uri(mlflow_params["tracking_uri"])
+        mlflow.set_experiment(mlflow_params["experiment_name"])
+    
+    if LOG_TO_MLFLOW:
+        with mlflow.start_run(run_name=mlflow_params["run_name"], tags=mlflow_params["tags"]) as run:
+            main()
+    else:
+        main()
