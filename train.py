@@ -979,7 +979,7 @@ def main():
 
 
 if __name__ == "__main__":
-    LOG_TO_MLFLOW = False
+    LOG_TO_MLFLOW = True
     if LOG_TO_MLFLOW:
         USERNAME = "n.kasatkin"
         os.environ[
