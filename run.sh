@@ -5,14 +5,13 @@ export PYTHONPATH=.:${PYTHONPATH}
 
 
 taskset -c 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20 python3 train.py \
-        --output_dir ./output/roberta-base \
+        --output_dir ./output/roberta-base-pretrained-test \
         --cache_dir ./output/cache \
         --model_type roberta \
-        --model_name_or_path roberta-base \
+        --model_name_or_path ./model_weights/roberta-base \
         --train_file ./data/train_separate_questions.json \
         --predict_file ./data/test.json \
-        --do_train \
-        --do_eval \
+        --category_description ./data/cat_desc.csv \
         --version_2_with_negative \
         --learning_rate 1e-4 \
         --num_train_epochs 4 \
@@ -27,3 +26,5 @@ taskset -c 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20 python3 train.py
         --num_workers 4 \
         --threads 8 \
         --logging_steps=1 \
+        --do_eval \
+#         --do_train \

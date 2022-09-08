@@ -852,7 +852,7 @@ def main():
         bool(args.local_rank != -1),
         args.fp16,
     )
-#     assert False
+
     # Set the verbosity to info of the Transformers logger (on main process only):
     if is_main_process(args.local_rank):
         transformers.utils.logging.set_verbosity_info()
@@ -989,7 +989,7 @@ if __name__ == "__main__":
         os.environ["MLFLOW_TRACKING_PASSWORD"] = "P2qsFTrnfFyZ6Q"
 
         mlflow_params = {
-            "run_name": "cuad-training", 
+            "run_name": "cuad-pretrained-test", 
             "tracking_uri": "https://mlflow.sit.auto",
             "experiment_name": "lawinsider-qa",
             "tags": {"mlflow.user": USERNAME},
